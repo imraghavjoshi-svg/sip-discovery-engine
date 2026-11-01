@@ -1,0 +1,5 @@
+.env
+.streamlit/secrets.toml
+__pycache__/
+CLAUDE.md
+.streamlit/redesign.txt

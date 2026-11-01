@@ -1,0 +1,131 @@
+{
+ "collected": 11434,
+ "sip_related": 2334,
+ "tagged": 792,
+ "parse_fail": 116,
+ "relevant": 494,
+ "sources_corpus": {
+  "play_store": 948,
+  "tradingqna": 598,
+  "youtube": 511,
+  "reddit_comment": 218,
+  "app_store": 34,
+  "reddit_post": 25
+ },
+ "trigger": {
+  "none": 259,
+  "app_problem": 86,
+  "payment_failure": 57,
+  "unclear": 31,
+  "market_drop": 16,
+  "trust_or_fees": 15,
+  "money_needed": 11,
+  "didnt_understand": 10,
+  "returns_disappointing": 9
+ },
+ "lapse_type": {
+  "none": 339,
+  "unclear": 62,
+  "involuntary": 50,
+  "voluntary": 43
+ },
+ "sip_status": {
+  "active": 210,
+  "unclear": 140,
+  "never_started": 87,
+  "lapsed": 57
+ },
+ "stage": {
+  "unclear": 389,
+  "pre_start": 41,
+  "month_0_3": 28,
+  "after_stopping": 23,
+  "month_6_12": 8,
+  "month_3_6": 5
+ },
+ "trigger_by_source_pct": {
+  "app_store": {
+   "app_problem": 21,
+   "didnt_understand": 0,
+   "market_drop": 0,
+   "money_needed": 4,
+   "none": 62,
+   "payment_failure": 0,
+   "returns_disappointing": 0,
+   "trust_or_fees": 0,
+   "unclear": 12
+  },
+  "play_store": {
+   "app_problem": 45,
+   "didnt_understand": 1,
+   "market_drop": 0,
+   "money_needed": 1,
+   "none": 23,
+   "payment_failure": 25,
+   "returns_disappointing": 0,
+   "trust_or_fees": 6,
+   "unclear": 0
+  },
+  "reddit_comment": {
+   "app_problem": 1,
+   "didnt_understand": 0,
+   "market_drop": 12,
+   "money_needed": 5,
+   "none": 58,
+   "payment_failure": 15,
+   "returns_disappointing": 3,
+   "trust_or_fees": 0,
+   "unclear": 6
+  },
+  "reddit_post": {
+   "app_problem": 0,
+   "didnt_understand": 0,
+   "market_drop": 10,
+   "money_needed": 20,
+   "none": 50,
+   "payment_failure": 10,
+   "returns_disappointing": 10,
+   "trust_or_fees": 0,
+   "unclear": 0
+  },
+  "tradingqna": {
+   "app_problem": 11,
+   "didnt_understand": 0,
+   "market_drop": 4,
+   "money_needed": 0,
+   "none": 50,
+   "payment_failure": 7,
+   "returns_disappointing": 4,
+   "trust_or_fees": 4,
+   "unclear": 21
+  },
+  "youtube": {
+   "app_problem": 1,
+   "didnt_understand": 5,
+   "market_drop": 2,
+   "money_needed": 2,
+   "none": 76,
+   "payment_failure": 0,
+   "returns_disappointing": 2,
+   "trust_or_fees": 2,
+   "unclear": 9
+  }
+ },
+ "validation": {
+  "golden_set_n": 20,
+  "human_agreement_overall": 0.62,
+  "by_field": {
+   "relevant": 0.65,
+   "stage": 0.7,
+   "sip_status": 0.4,
+   "lapse_type": 0.6,
+   "trigger": 0.7,
+   "first_time": 0.7
+  },
+  "self_consistency_two_runs": 0.71,
+  "self_consistency_trigger": 0.45,
+  "trigger_after_majority_vote": 0.7,
+  "quote_verified": 563,
+  "quote_total": 792
+ }
+}

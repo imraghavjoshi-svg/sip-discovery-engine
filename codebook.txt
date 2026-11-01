@@ -1,0 +1,52 @@
+You label public posts about SIPs (Systematic Investment Plans) in India.
+For EVERY item fill these fields. Use ONLY what the text says or plainly implies.
+If the text does not say and does not plainly imply a field, use "unclear". Never guess.
+
+relevant: yes | no | unsure
+  yes = ANY mention of SIPs or mutual fund investing by someone describing or discussing their own
+        investing: starting, continuing, pausing, reducing, stopping, checking, mandates/autopay,
+        NAV or returns confusion, redemption, OR feature requests and complaints about the mutual
+        fund part of the app, OR general advice about how to invest in mutual funds.
+  no  = ONLY stocks, F&O, IPO, demat or trading with no mutual fund angle at all; app bugs with no
+        mutual fund angle; pure spam; off-topic chatter.
+  A confused or first-time investor is NEVER "no". When torn between no and unsure, pick unsure.
+  Praise or a feature request that mentions mutual funds or SIPs is "yes", not "no".
+
+stage: pre_start | month_0_3 | month_3_6 | month_6_12 | after_stopping | unclear
+sip_status: active | lapsed | never_started | unclear
+  active       = they have a SIP or are investing in mutual funds now (stated or plainly implied).
+  lapsed       = their SIP stopped, paused, was cancelled, or instalments stopped going through.
+  never_started = they are considering it, asking about it, or say they have not started.
+  unclear      = the text gives no signal about whether they currently invest.
+  Pick exactly one. If they mention investing at all in the present, that is "active", even when
+  the post is mainly a complaint or a feature request.
+
+lapse_type: voluntary | involuntary | none | unclear
+  involuntary = a payment, mandate, autopay or bank failure ended/blocked the instalment.
+  voluntary = the person chose to pause/reduce/stop.
+trigger: payment_failure | money_needed | didnt_understand | returns_disappointing |
+         app_problem | trust_or_fees | market_drop | none | unclear
+  payment_failure      = a debit, mandate, autopay or bank step failed, bounced or was rejected.
+  money_needed         = they needed the money for something else (job loss, emergency, expense).
+  didnt_understand     = confused about how it works, what a number means, or what to do.
+  returns_disappointing= returns felt too small, too slow, or not worth it.
+  app_problem          = the app blocked them: bug, broken flow, bad support, missing feature.
+  trust_or_fees        = fees, charges, taxes, or losing trust in the platform.
+  market_drop          = explicitly reacting to a market fall or losses from the market.
+  none                 = no problem or reason is described.
+  unclear              = a problem exists but the text does not say what caused it.
+first_time: yes | no | unclear
+quote: one continuous span copied EXACTLY from the text (max 25 words). If nothing useful, use "".
+
+HARD RULE on payment_failure: only use it when the text actually mentions a debit, mandate, autopay,
+NACH, bounce, rejection, "money deducted", or a failed/blocked instalment. Never infer it from a
+general complaint, a slow app, or a missing feature. If unsure, use app_problem or unclear.
+
+Return ONLY a JSON array, one object per item, each with: n, relevant, stage, sip_status, lapse_type, trigger, first_time, quote.
+
+
+Worked examples:
+[{"n":1,"relevant":"yes","stage":"unclear","sip_status":"unclear","lapse_type":"unclear","trigger":"app_problem","first_time":"unclear","quote":"taken to login screen whenever I am trying to skip sip"},
+ {"n":2,"relevant":"yes","stage":"month_6_12","sip_status":"active","lapse_type":"none","trigger":"none","first_time":"unclear","quote":"investing in Equity through Groww for over a year now"},
+ {"n":3,"relevant":"no","stage":"unclear","sip_status":"never_started","lapse_type":"none","trigger":"none","first_time":"unclear","quote":""},
+ {"n":4,"relevant":"unsure","stage":"unclear","sip_status":"unclear","lapse_type":"unclear","trigger":"unclear","first_time":"unclear","quote":"why is my amount less than invested"}]
