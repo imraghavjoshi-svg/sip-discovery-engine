@@ -1,9 +1,9 @@
 {
  "collected": 11434,
  "sip_related": 2334,
- "tagged": 792,
- "parse_fail": 116,
- "relevant": 494,
+ "tagged": 1023,
+ "parse_fail": 118,
+ "relevant": 683,
  "sources_corpus": {
   "play_store": 948,
   "tradingqna": 598,
@@ -13,35 +13,35 @@
   "reddit_post": 25
  },
  "trigger": {
-  "none": 259,
-  "app_problem": 86,
-  "payment_failure": 57,
-  "unclear": 31,
-  "market_drop": 16,
-  "trust_or_fees": 15,
-  "money_needed": 11,
-  "didnt_understand": 10,
-  "returns_disappointing": 9
+  "none": 360,
+  "app_problem": 130,
+  "payment_failure": 68,
+  "unclear": 41,
+  "trust_or_fees": 22,
+  "market_drop": 21,
+  "returns_disappointing": 15,
+  "didnt_understand": 14,
+  "money_needed": 12
  },
  "lapse_type": {
-  "none": 339,
-  "unclear": 62,
-  "involuntary": 50,
-  "voluntary": 43
+  "none": 478,
+  "unclear": 80,
+  "involuntary": 65,
+  "voluntary": 60
  },
  "sip_status": {
-  "active": 210,
-  "unclear": 140,
-  "never_started": 87,
-  "lapsed": 57
+  "active": 309,
+  "unclear": 187,
+  "never_started": 109,
+  "lapsed": 78
  },
  "stage": {
-  "unclear": 389,
-  "pre_start": 41,
-  "month_0_3": 28,
-  "after_stopping": 23,
-  "month_6_12": 8,
-  "month_3_6": 5
+  "unclear": 538,
+  "pre_start": 49,
+  "month_0_3": 41,
+  "after_stopping": 36,
+  "month_6_12": 13,
+  "month_3_6": 6
  },
  "trigger_by_source_pct": {
   "app_store": {
@@ -56,37 +56,37 @@
    "unclear": 12
   },
   "play_store": {
-   "app_problem": 45,
+   "app_problem": 41,
    "didnt_understand": 1,
    "market_drop": 0,
-   "money_needed": 1,
-   "none": 23,
-   "payment_failure": 25,
-   "returns_disappointing": 0,
+   "money_needed": 0,
+   "none": 31,
+   "payment_failure": 18,
+   "returns_disappointing": 1,
    "trust_or_fees": 6,
-   "unclear": 0
+   "unclear": 1
   },
   "reddit_comment": {
-   "app_problem": 1,
-   "didnt_understand": 0,
-   "market_drop": 12,
-   "money_needed": 5,
-   "none": 58,
-   "payment_failure": 15,
-   "returns_disappointing": 3,
+   "app_problem": 3,
+   "didnt_understand": 1,
+   "market_drop": 10,
+   "money_needed": 4,
+   "none": 62,
+   "payment_failure": 9,
+   "returns_disappointing": 4,
    "trust_or_fees": 0,
-   "unclear": 6
+   "unclear": 8
   },
   "reddit_post": {
    "app_problem": 0,
-   "didnt_understand": 0,
-   "market_drop": 10,
-   "money_needed": 20,
-   "none": 50,
-   "payment_failure": 10,
-   "returns_disappointing": 10,
+   "didnt_understand": 4,
+   "market_drop": 4,
+   "money_needed": 7,
+   "none": 63,
+   "payment_failure": 4,
+   "returns_disappointing": 11,
    "trust_or_fees": 0,
-   "unclear": 0
+   "unclear": 7
   },
   "tradingqna": {
    "app_problem": 11,
@@ -127,5 +127,20 @@
   "trigger_after_majority_vote": 0.7,
   "quote_verified": 563,
   "quote_total": 792
- }
+ },
+ "tagged_by_batch": {
+  "1 (Oct 2026 scrape)": 785,
+  "2 (Nov 2026 top-up)": 238
+ },
+ "lapse_type_lapsed_only": {
+  "voluntary": 43,
+  "involuntary": 33,
+  "unclear": 2
+ },
+ "missed_instalment_still_active": 46,
+ "relevant_by_recency": {
+  "current (2024+)": 507,
+  "historical (pre-2024)": 176
+ },
+ "_note": "Counts above are recomputed from tagged_items.csv (relevant == yes, PARSE_FAIL excluded) and corpus_sip.csv. 'collected' and everything under 'validation' cannot be recomputed from the files in this folder and are kept as recorded. The dashboard computes every count live from the CSVs and reads only 'collected' and 'validation' from this file."
 }

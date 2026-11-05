@@ -240,15 +240,28 @@ def mask_handles(text):
     return _HANDLE_RE.sub("[user]", text)
 
 
+def date_label(raw, precision):
+    """'12 Oct 2026' for exact dates; 'approx. Oct 2024' when the source only gave a relative date."""
+    d = pd.to_datetime(raw, errors="coerce", format="mixed")
+    if pd.isna(d):
+        return "date not recorded"
+    if str(precision).strip().lower() == "exact":
+        return f"{d.day} {d:%b %Y}"
+    return f"approx. {d:%b %Y}"
+
+
 @st.cache_data
 def load_tagged():
+    """All tagged rows, with PARSE_FAIL rows split off (they are failed API responses, not judgements)."""
     df = pd.read_csv(HERE / "tagged_items.csv")
-    n_fail = int((df["relevant"] == "PARSE_FAIL").sum())
+    df["period"] = df["recency"].astype(str).str.startswith("current").map({True: "current", False: "before"})
+    fails = df[df["relevant"] == "PARSE_FAIL"].copy()
     df = df[df["relevant"] != "PARSE_FAIL"].copy()  # excluded from every count
     df["text"] = df["text"].map(mask_handles)
     df["quote"] = df["quote"].map(mask_handles)
     df["quote_verified"] = df["quote_verified"].astype(bool)
-    return df, n_fail
+    df["date_label"] = [date_label(d, p) for d, p in zip(df["date"], df["date_precision"])]
+    return df, fails
 
 
 @st.cache_data
@@ -275,13 +288,72 @@ def load_source_table():
     return pd.DataFrame(out)
 
 
+@st.cache_data
+def corpus_ids():
+    return set(pd.read_csv(HERE / "corpus_sip.csv", usecols=["id"])["id"].astype(str))
+
+
+# findings.json is used ONLY for numbers that cannot be recomputed from the files in this folder:
+# the raw collection total and the validation results. Every other count is computed from tagged_items.csv.
 F = load_findings()
-TAGGED, N_FAIL = load_tagged()
-RELEVANT = TAGGED[TAGGED["relevant"] == "yes"]
-N_REL = F["relevant"]
 V = F["validation"]
-N_BY_SOURCE = RELEVANT["source"].value_counts().to_dict()
-EXCL = f"excludes {N_FAIL} PARSE_FAIL"
+ALL_TAGGED, ALL_FAILS = load_tagged()
+N_SIP_RELATED = len(corpus_ids())  # rows in corpus_sip.csv (first scrape)
+N_ALL_TAGGED = len(ALL_TAGGED) + len(ALL_FAILS)
+# Tagged rows that are not in corpus_sip.csv came from the later top-up collection.
+N_TOPUP = int((~pd.concat([ALL_TAGGED["id"], ALL_FAILS["id"]]).astype(str).isin(corpus_ids())).sum())
+N_PLATFORMS = len({SOURCE_LABELS.get(s, s).split()[0] for s in ALL_TAGGED["source"].unique()})  # Reddit posts + comments = 1
+
+PERIODS = {
+    "current": "Current (2024 onwards)",
+    "all": "All years",
+    "before": "Before 2024 only",
+}
+PERIOD_SHORT = {"current": "2024 onwards", "all": "all years", "before": "before 2024"}
+
+# Set by apply_period() before any page is drawn.
+PERIOD = "current"
+TAGGED = RELEVANT = FAILS = None
+N_FAIL = N_REL = 0
+N_BY_SOURCE = {}
+EXCL = ""
+
+
+def in_period(df, period):
+    return df if period == "all" else df[df["period"] == period]
+
+
+def apply_period(period):
+    """Every count, chart and caption on every page is drawn from these period-filtered frames."""
+    global PERIOD, TAGGED, RELEVANT, FAILS, N_FAIL, N_REL, N_BY_SOURCE, EXCL
+    PERIOD = period
+    TAGGED = in_period(ALL_TAGGED, period)
+    FAILS = in_period(ALL_FAILS, period)
+    RELEVANT = TAGGED[TAGGED["relevant"] == "yes"]
+    N_FAIL = len(FAILS)
+    N_REL = len(RELEVANT)
+    N_BY_SOURCE = RELEVANT["source"].value_counts().to_dict()
+    EXCL = f"{PERIOD_SHORT[period]} · excludes {N_FAIL} PARSE_FAIL"
+
+
+def n_threads(df):
+    return int(df["thread_id"].nunique())
+
+
+def indep(df):
+    """'57 items from 45 independent sources' (a source = one distinct thread, video, review or post)."""
+    n, t = len(df), n_threads(df)
+    return f"{n} item{'s' if n != 1 else ''} from {t} independent source{'s' if t != 1 else ''}"
+
+
+def lapsed(df):
+    """Voluntary / involuntary lapses are counted only for people whose SIP has stopped."""
+    return df[(df["sip_status"] == "lapsed") & df["lapse_type"].isin(["involuntary", "voluntary"])]
+
+
+def missed_but_active(df):
+    """Active SIPs that still carry a lapse type: a missed instalment, but the person kept investing."""
+    return df[(df["sip_status"] == "active") & df["lapse_type"].isin(["involuntary", "voluntary"])]
 
 
 def pct(x, n):
@@ -345,9 +417,49 @@ def note(text):
     st.markdown(f'<div class="cap">{esc(text)}</div>', unsafe_allow_html=True)
 
 
-def caption(n, what, excl=EXCL):
-    """Global caption format: n = <count> records · <what> · <exclusion>"""
-    note(f"n = {n:,} records · {what} · {excl}")
+def caption(n, what, excl=None):
+    """Global caption format: n = <count> records · <what> · <period> · <exclusion>"""
+    note(f"n = {n:,} records · {what} · {excl or EXCL}")
+
+
+def lapse_label(r):
+    lt = r["lapse_type"]
+    if lt in ("involuntary", "voluntary") and r["sip_status"] == "active":
+        return f"Missed an instalment ({lt}), still investing"
+    return LAPSE_LABELS.get(lt, lt)
+
+
+def lapse_color(r):
+    return LAPSE_COLORS.get(r["lapse_type"], ACCENT) if r["sip_status"] == "lapsed" else ACCENT
+
+
+def source_link(url):
+    url = str(url or "")
+    if not url.startswith(("https://", "http://")):
+        return ""
+    return f'<a href="{html.escape(url, quote=True)}" target="_blank" rel="noopener noreferrer">View source</a>'
+
+
+def evidence_card(r, prefix="", extra_tags=""):
+    """One quote / evidence card: source, date, View source link, quote, tags."""
+    quote = (
+        f'<div class="vq">“{esc(r["quote"])}”</div>'
+        if r["quote_verified"] and r["quote"]
+        else '<div class="noq">No verified quote for this record.</div>'
+    )
+    link = source_link(r.get("url"))
+    st.markdown(
+        card_html(
+            f'<div class="meta"><span><b>{esc(prefix)}{esc(SOURCE_LABELS.get(r["source"], r["source"]))}</b></span>'
+            f'<span>{esc(r["date_label"])}</span>'
+            f'{f"<span>{link}</span>" if link else ""}'
+            f'<span class="id">id {esc(r["id"])}</span></div>{quote}'
+            f'<div class="tags">Trigger: {esc(TRIGGER_LABELS.get(r["trigger"], r["trigger"]))} · '
+            f'Lapse: {esc(lapse_label(r))}{extra_tags}</div>',
+            lapse_color(r),
+        ),
+        unsafe_allow_html=True,
+    )
 
 
 def table(df):
@@ -372,9 +484,26 @@ def footer():
         f'<div class="foot"><b>Not investment advice.</b> This dashboard describes what public posts say; '
         f"it does not recommend any fund, stock or action. Built from public data only. No usernames or "
         f"personal data are shown (handles in post text are replaced with [user]). {N_FAIL} tagged records "
-        f"that failed to parse (PARSE_FAIL) are excluded from every count.</div>",
+        f"from this evidence period that failed to parse (PARSE_FAIL) are excluded from every count.</div>",
         unsafe_allow_html=True,
     )
+
+
+def period_control():
+    """The one global control: which years of evidence every page uses."""
+    period = st.radio(
+        "Evidence period", list(PERIODS), format_func=PERIODS.get, horizontal=True, key="period",
+    )
+    apply_period(period)
+    rel_all = ALL_TAGGED[ALL_TAGGED["relevant"] == "yes"]
+    hidden = len(rel_all) - N_REL
+    if period == "current":
+        line = f"Showing {N_REL:,} items. {hidden:,} items from before 2024 are hidden."
+    elif period == "before":
+        line = f"Showing {N_REL:,} items. {hidden:,} items from 2024 onwards are hidden."
+    else:
+        line = f"Showing all {N_REL:,} items, from every year."
+    st.markdown(f'<div class="small">{esc(line)} Items = relevant tagged records.</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -410,7 +539,9 @@ def hbar(df, title, x_title="Records", max_x=None, label_width=190):
     df = df.copy().sort_values("value", ascending=False)
     if "color" not in df:
         df["color"] = ACCENT
-    top = max_x if max_x is not None else (df["value"].max() * 1.35 or 1)
+    # Leave room for the value label at the end of the longest bar (longer labels need more room).
+    pad = 1.35 if df["text"].str.len().max() <= 12 else 2.1
+    top = max_x if max_x is not None else (df["value"].max() * pad or 1)
     base = alt.Chart(df).encode(
         y=alt.Y("label:N", sort=df["label"].tolist(), title=None, axis=_y_axis(label_width), scale=Y_BAND),
         x=alt.X("value:Q", title=x_title, scale=alt.Scale(domain=[0, top]), axis=_x_axis(x_title)),
@@ -425,27 +556,31 @@ def show(chart):
     st.altair_chart(chart, use_container_width=True, theme=None)
 
 
-def split_df(series: pd.Series, labels: dict, colors=None):
-    """Counts of a categorical column -> chart frame with 'count (share)' labels."""
-    n = len(series)
-    vc = series.value_counts()
-    rows = [
-        {
+def split_df(data: pd.DataFrame, col: str, labels: dict, colors=None, sources=False):
+    """Counts of a categorical column -> chart frame with 'share (count)' labels.
+    With sources=True the label also gives the number of independent sources (distinct thread_id)."""
+    n = len(data)
+    rows = []
+    for k, g in data.groupby(col):
+        v, t = len(g), n_threads(g)
+        rows.append({
             "label": labels.get(k, k),
             "value": int(v),
-            "text": f"{v / n:.0%} ({int(v)})",
+            "threads": t,
+            "text": f"{v / n:.0%} ({v} from {t} sources)" if sources else f"{v / n:.0%} ({v})",
             "color": (colors or {}).get(k, ACCENT),
-        }
-        for k, v in vc.items()
-    ]
-    return pd.DataFrame(rows)
+        })
+    return pd.DataFrame(rows, columns=["label", "value", "threads", "text", "color"]).sort_values("value", ascending=False)
 
 
-def split_block(series, labels, title_fn, what, colors=None, excl=EXCL, tables=False):
+def split_block(data, col, labels, title_fn, what, colors=None, excl=None, tables=False, sources=False):
     """Chart (or table) + caption, or an insufficient-evidence box when n < MIN_N."""
-    n = len(series)
-    df = split_df(series, labels, colors)
-    tbl = df.rename(columns={"label": "Category", "value": "Records"})[["Category", "Records"]]
+    n = len(data)
+    df = split_df(data, col, labels, colors, sources)
+    cols = ["Category", "Records"] + (["Independent sources"] if sources else [])
+    tbl = df.rename(columns={"label": "Category", "value": "Records", "threads": "Independent sources"})[cols]
+    if sources:
+        what += " · independent sources = distinct threads, videos, reviews or posts"
     if n < MIN_N:
         insufficient(n, tbl)
         caption(n, what, excl)
@@ -479,6 +614,17 @@ def evidence_strength(sub: pd.DataFrame):
     return "Moderate"
 
 
+OPPORTUNITY_TITLES = {
+    "payment_failure": ("Payment and mandate failures that end SIPs without the investor choosing to", INVOLUNTARY),
+    "app_problem": ("App problems that block SIP actions: bugs, broken flows, support", ACCENT),
+    "market_drop": ("Reactions to market falls", VOLUNTARY),
+    "trust_or_fees": ("Doubts about trust, charges or fees", VOLUNTARY),
+    "money_needed": ("Needing the money for something else", VOLUNTARY),
+    "didnt_understand": ("Not understanding how SIPs or the app work", VOLUNTARY),
+    "returns_disappointing": ("Returns lower than expected", VOLUNTARY),
+}
+
+
 def opportunity_card(title, sub, color):
     n = len(sub)
     vc = sub["source"].value_counts()
@@ -487,7 +633,7 @@ def opportunity_card(title, sub, color):
     st.markdown(
         card_html(
             f"<h4>{esc(title)}</h4>"
-            f'<div class="row"><span class="k">Records</span><span class="v">{n}</span></div>'
+            f'<div class="row"><span class="k">Records</span><span class="v">{esc(indep(sub))}</span></div>'
             f'<div class="row"><span class="k">Share of relevant</span><span class="v">{cnt_pct(n, N_REL)}</span></div>'
             f'<div class="row"><span class="k">Sources</span><span class="v">{esc(srcs)}</span></div>'
             f'<div class="row"><span class="k">Evidence strength</span><span class="v"><b>{strength}</b> · unverified</span></div>',
@@ -508,21 +654,26 @@ def page_overview():
         "built to understand why first-time investors stop within 12 months. The product studied is Groww.",
         toggle_key="tables_overview",
     )
+    n_tagged = len(TAGGED) + N_FAIL
     tiles(
         [
-            (f"{F['collected']:,}", "posts collected", "neutral"),
-            (f"{F['sip_related']:,}", "SIP-related after filtering", "neutral"),
-            (f"{F['tagged']:,}", "tagged by the model", "neutral"),
-            (f"{N_REL}", "confirmed relevant", "neutral"),
-            (f"{F['parse_fail']}", "excluded as PARSE_FAIL", "warn"),
+            (f"{F['collected']:,}", "posts collected (all years, first scrape)", "neutral"),
+            (f"{N_SIP_RELATED:,}", "SIP-related after filtering (all years, first scrape)", "neutral"),
+            (f"{n_tagged:,}", f"tagged by the model ({PERIOD_SHORT[PERIOD]})", "neutral"),
+            (f"{N_REL}", f"confirmed relevant ({PERIOD_SHORT[PERIOD]})", "neutral"),
+            (f"{N_FAIL}", f"excluded as PARSE_FAIL ({PERIOD_SHORT[PERIOD]})", "warn"),
         ]
+    )
+    note(
+        "The first two tiles describe the whole first collection and are not split by year. "
+        "The other three follow the evidence period."
     )
 
     section("How the evidence was built")
     steps = [
-        ("Collect", f"{F['collected']:,} public posts from 5 sources"),
-        ("Filter", f"{F['sip_related']:,} SIP-related posts kept"),
-        ("Tag", f"{F['tagged']} labelled against a fixed codebook"),
+        ("Collect", f"{F['collected']:,} public posts from {N_PLATFORMS} sources"),
+        ("Filter", f"{N_SIP_RELATED:,} SIP-related posts kept"),
+        ("Tag", f"{N_ALL_TAGGED:,} labelled against a fixed codebook, incl. {N_TOPUP} from a later top-up"),
         ("Verify quotes", "Each quote checked word-for-word against its post"),
         ("Validate", f"{V['golden_set_n']}-item blind human golden set, plus repeat runs"),
         ("Compare", "Every finding split by source before it is ranked"),
@@ -544,19 +695,18 @@ def page_overview():
         unsafe_allow_html=True,
     )
     r = RELEVANT
-    cards = [
-        ("Payment and mandate failures that end SIPs without the investor choosing to",
-         r[r["trigger"] == "payment_failure"], INVOLUNTARY),
-        ("App problems that block SIP actions: bugs, broken flows, support", r[r["trigger"] == "app_problem"], ACCENT),
-        ("Reactions to market falls", r[r["trigger"] == "market_drop"], VOLUNTARY),
-    ]
-    if tables:
+    top3 = r[r["trigger"].isin(NAMED_TRIGGERS)]["trigger"].value_counts().head(3).index.tolist()
+    cards = [(OPPORTUNITY_TITLES[t][0], r[r["trigger"] == t], OPPORTUNITY_TITLES[t][1]) for t in top3]
+    if not cards:
+        gap_box("No named trigger in this evidence period.", head="No records")
+    elif tables:
         table(
             pd.DataFrame(
                 [
                     {
                         "Opportunity": t,
                         "Records": len(s),
+                        "Independent sources": n_threads(s),
                         "Share of relevant": pct(len(s), N_REL),
                         "Largest source": f"{SOURCE_LABELS[s['source'].value_counts().index[0]]} ({s['source'].value_counts().iloc[0]})",
                         "Sources": s["source"].nunique(),
@@ -573,6 +723,8 @@ def page_overview():
                 opportunity_card(title, sub, color)
     caption(N_REL, "relevant records; each card counts records with that trigger")
     note(
+        "Independent sources = distinct threads, videos, reviews or posts; several comments in one thread "
+        "count as one source. "
         "Evidence strength rule: Strong = 50+ records from 3+ sources with no single source above 75%. "
         "Moderate = 30+ records, or 50+ dominated by one source. Weak = fewer than 30 records. "
         "Top border: teal = involuntary-related, purple = voluntary-related, amber = other."
@@ -584,38 +736,45 @@ def page_overview():
 # PAGE 2 - What investors do
 # ---------------------------------------------------------------------------
 BEHAVIOURS = {
-    "Payment failure named": ("trigger", "payment_failure", INVOLUNTARY),
-    "App problem named": ("trigger", "app_problem", ACCENT),
-    "No problem described": ("trigger", "none", ACCENT),
-    "SIP has lapsed": ("sip_status", "lapsed", ACCENT),
-    "Involuntary lapse": ("lapse_type", "involuntary", INVOLUNTARY),
-    "Voluntary lapse": ("lapse_type", "voluntary", VOLUNTARY),
+    "Payment failure named": (lambda d: d["trigger"] == "payment_failure", INVOLUNTARY),
+    "App problem named": (lambda d: d["trigger"] == "app_problem", ACCENT),
+    "No problem described": (lambda d: d["trigger"] == "none", ACCENT),
+    "SIP has lapsed": (lambda d: d["sip_status"] == "lapsed", ACCENT),
+    # Lapse types count only for people whose SIP has stopped.
+    "Involuntary lapse": (lambda d: (d["sip_status"] == "lapsed") & (d["lapse_type"] == "involuntary"), INVOLUNTARY),
+    "Voluntary lapse": (lambda d: (d["sip_status"] == "lapsed") & (d["lapse_type"] == "voluntary"), VOLUNTARY),
 }
 
 
 def lapse_block(lap, excl, tables):
-    """Lapses by trigger, stacked involuntary / voluntary."""
+    """Lapses by trigger, stacked involuntary / voluntary. `lap` holds lapsed SIPs only."""
     n = len(lap)
     ct = lap.groupby(["trigger", "lapse_type"]).size().reset_index(name="n")
     ct["label"] = ct["trigger"].map(TRIGGER_LABELS)
     ct["type"] = ct["lapse_type"].map({"involuntary": "Involuntary", "voluntary": "Voluntary"})
-    tbl = ct.pivot_table(index="label", columns="type", values="n", fill_value=0).reset_index()
+    threads = lap.groupby("trigger")["thread_id"].nunique()
+    tbl = ct.pivot_table(index="trigger", columns="type", values="n", fill_value=0).reset_index()
     for c in ("Involuntary", "Voluntary"):
         if c not in tbl:
             tbl[c] = 0
     tbl["Total"] = tbl["Involuntary"] + tbl["Voluntary"]
-    tbl = tbl.rename(columns={"label": "Trigger"}).sort_values("Total", ascending=False)[
-        ["Trigger", "Involuntary", "Voluntary", "Total"]]
-    what = "relevant records describing a voluntary or involuntary lapse, by trigger"
+    tbl["Independent sources"] = tbl["trigger"].map(threads).fillna(0).astype(int)
+    tbl["Trigger"] = tbl["trigger"].map(TRIGGER_LABELS)
+    tbl = tbl.sort_values("Total", ascending=False)[["Trigger", "Involuntary", "Voluntary", "Total", "Independent sources"]]
+    what = ("relevant records whose SIP has lapsed, voluntary or involuntary, by trigger · "
+            "independent sources = distinct threads, videos, reviews or posts")
     if n < MIN_N:
         insufficient(n, tbl)
         caption(n, what, excl)
         return
     inv = lap[lap["lapse_type"] == "involuntary"]
+    vol = lap[lap["lapse_type"] == "voluntary"]
     pf_inv = int((inv["trigger"] == "payment_failure").sum())
-    title = (f"Payment failures are {pf_inv} of the {len(inv)} involuntary lapses; "
-             f"voluntary lapses spread across several triggers") if len(inv) else "No involuntary lapses in this view"
-    title += f" (N={n})"
+    title = (f"Payment failures are {pf_inv} of the {len(inv)} involuntary lapses"
+             if len(inv) else "No involuntary lapses in this view")
+    if len(vol):
+        title += f"; the {len(vol)} voluntary lapses spread across {vol['trigger'].nunique()} triggers"
+    title += f" (N={n}, {n_threads(lap)} independent sources)"
     if tables:
         finding(title)
         table(tbl)
@@ -623,13 +782,15 @@ def lapse_block(lap, excl, tables):
         return
     totals = ct.groupby("label")["n"].sum().sort_values(ascending=False)
     tot_df = totals.reset_index().rename(columns={"n": "total"})
-    tot_df["text"] = tot_df["total"].map(lambda t: f"{t / n:.0%} ({t})")
+    thr_by_label = {TRIGGER_LABELS.get(k, k): v for k, v in threads.items()}
+    tot_df["text"] = [f"{t / n:.0%} ({t} from {thr_by_label.get(lb, 0)} sources)"
+                      for lb, t in zip(tot_df["label"], tot_df["total"])]
     order = totals.index.tolist()
     y = alt.Y("label:N", sort=order, title=None, axis=_y_axis(170), scale=Y_BAND)
     bars = alt.Chart(ct).mark_bar(stroke=INK, strokeWidth=1.2, cornerRadius=0).encode(
         y=y,
-        x=alt.X("n:Q", title="Records describing a lapse", stack="zero",
-                scale=alt.Scale(domain=[0, totals.max() * 1.35]), axis=_x_axis("Records describing a lapse")),
+        x=alt.X("n:Q", title="Lapsed SIPs", stack="zero",
+                scale=alt.Scale(domain=[0, totals.max() * 2.1]), axis=_x_axis("Lapsed SIPs")),
         color=alt.Color("type:N", scale=alt.Scale(domain=["Involuntary", "Voluntary"], range=[INVOLUNTARY, VOLUNTARY]),
                         legend=alt.Legend(title=None, orient="top", labelColor=MUTED, symbolType="square")),
         order=alt.Order("type:N"),
@@ -643,9 +804,10 @@ def lapse_block(lap, excl, tables):
 
 
 def page_behaviour():
-    ss = F["sip_status"]
+    ss = RELEVANT["sip_status"].value_counts()
     tables = page_title(
-        f"{ss['active']} of {N_REL} relevant records describe an active SIP; {ss['lapsed']} describe one that lapsed",
+        f"{int(ss.get('active', 0))} of {N_REL} relevant records describe an active SIP; "
+        f"{int(ss.get('lapsed', 0))} describe one that lapsed",
         "Use the filters to narrow every chart below. Charts drawn on fewer than 30 records are replaced by raw counts.",
         toggle_key="tables_behaviour",
     )
@@ -669,50 +831,65 @@ def page_behaviour():
     flt = ("filtered to " + "; ".join(parts) + " · ") if parts else ""
     excl = f"{flt}{EXCL}"
     n = len(df)
-    lc = df["lapse_type"].value_counts()
+    lap_df = lapsed(df)
+    inv_df = lap_df[lap_df["lapse_type"] == "involuntary"]
+    vol_df = lap_df[lap_df["lapse_type"] == "voluntary"]
+    missed = missed_but_active(df)
     tiles(
         [
             (f"{n}", f"relevant records in view (of {N_REL})", "neutral"),
             (f"{int((df['sip_status'] == 'active').sum())}", "active SIP", "neutral"),
             (f"{int((df['sip_status'] == 'lapsed').sum())}", "lapsed SIP", "neutral"),
-            (f"{int(lc.get('involuntary', 0))}", "involuntary lapses", "inv"),
-            (f"{int(lc.get('voluntary', 0))}", "voluntary lapses", "vol"),
+            (f"{len(inv_df)}", f"involuntary lapses · {n_threads(inv_df)} independent sources", "inv"),
+            (f"{len(vol_df)}", f"voluntary lapses · {n_threads(vol_df)} independent sources", "vol"),
         ]
+    )
+    st.markdown(
+        f"<div class='small'>Missed an instalment but still investing: <b>{len(missed)}</b> "
+        f"({esc(indep(missed))}). These active SIPs are not counted as lapses.</div>",
+        unsafe_allow_html=True,
     )
 
     section("SIP status and lapses")
     left, right = st.columns(2)
     with left:
         split_block(
-            df["sip_status"], STATUS_LABELS,
+            df, "sip_status", STATUS_LABELS,
             lambda top, n: f"{top['label']} is the most common SIP status (N={n})",
             "relevant records by SIP status", excl=excl, tables=tables,
         )
     with right:
+        lapsed_all = df[df["sip_status"] == "lapsed"]
         split_block(
-            df["lapse_type"], LAPSE_LABELS,
-            lambda top, n: f"{top['label']} is the most common lapse type (N={n})",
-            "relevant records by lapse type", colors=LAPSE_COLORS, excl=excl, tables=tables,
+            lapsed_all, "lapse_type", LAPSE_LABELS,
+            lambda top, n: f"{top['label']} is the most common lapse type among lapsed SIPs (N={n})",
+            "relevant records whose SIP has lapsed, by lapse type", colors=LAPSE_COLORS, excl=excl,
+            tables=tables, sources=True,
         )
         st.markdown(
-            "<div class='small'>Involuntary (teal) = a payment, mandate or bank step ended the "
-            "instalment. Voluntary (purple) = the person chose to pause, reduce or stop.</div>",
+            "<div class='small'>Counted only where the SIP has lapsed. Involuntary (teal) = a payment, mandate "
+            "or bank step ended the instalment. Voluntary (purple) = the person chose to pause, reduce or stop. "
+            f"Missed an instalment but still investing: {len(missed)}.</div>",
             unsafe_allow_html=True,
         )
 
     section("What lies behind each lapse")
-    lapse_block(df[df["lapse_type"].isin(["involuntary", "voluntary"])], excl, tables)
-    st.markdown(
-        "<div class='small'>Payment failures come mostly from Play Store reviews, so their share here partly "
-        "reflects where people complain. Compare sources below.</div>",
-        unsafe_allow_html=True,
-    )
+    lapse_block(lap_df, excl, tables)
+    pf = df[df["trigger"] == "payment_failure"]
+    pf_ps = int((pf["source"] == "play_store").sum())
+    if len(pf):
+        st.markdown(
+            f"<div class='small'>{pf_ps} of the {len(pf)} payment failures in this view come from Play Store "
+            "reviews, so their share here partly reflects where people complain. Compare sources below.</div>",
+            unsafe_allow_html=True,
+        )
 
     section("What triggers a problem")
     split_block(
-        df["trigger"], TRIGGER_LABELS,
+        df, "trigger", TRIGGER_LABELS,
         lambda top, n: f"{top['label']} is the most common trigger (N={n})",
         "relevant records by trigger", colors={"payment_failure": INVOLUNTARY}, excl=excl, tables=tables,
+        sources=True,
     )
 
     section("Behaviour by source")
@@ -721,12 +898,13 @@ def page_behaviour():
         "write. Compare one behaviour across sources here."
     )
     beh = st.selectbox("Behaviour", list(BEHAVIOURS))
-    col, val, color = BEHAVIOURS[beh]
+    match, color = BEHAVIOURS[beh]
     rows = []
     for s, g in df.groupby("source"):
-        k = int((g[col] == val).sum())
-        rows.append({"source": s, "label": SOURCE_LABELS[s], "n": len(g), "k": k})
+        hit = g[match(g)]
+        rows.append({"source": s, "label": SOURCE_LABELS[s], "n": len(g), "k": len(hit), "t": n_threads(hit)})
     tbl = pd.DataFrame(rows)
+    src_col = f"{beh}: independent sources"
     if tbl.empty:
         insufficient(0, pd.DataFrame({"Source": [], "Records": []}))
         caption(0, f"relevant records by source · {beh.lower()}", excl)
@@ -735,7 +913,7 @@ def page_behaviour():
         small = tbl[tbl["n"] < MIN_N].copy()
         if len(big):
             big["value"] = big["k"] / big["n"] * 100
-            big["text"] = big.apply(lambda r: f"{r['k'] / r['n']:.0%} ({r['k']})", axis=1)
+            big["text"] = big.apply(lambda r: f"{r['k'] / r['n']:.0%} ({r['k']} from {r['t']} sources)", axis=1)
             big["color"] = color
             hi = big.sort_values("value", ascending=False).iloc[0]
             lo = big.sort_values("value").iloc[0]
@@ -748,17 +926,19 @@ def page_behaviour():
             if tables:
                 finding(title)
                 bt = big.sort_values("value", ascending=False).rename(
-                    columns={"label": "Source", "n": "Records", "k": beh})[["Source", "Records", beh]]
+                    columns={"label": "Source", "n": "Records", "k": beh, "t": src_col})[["Source", "Records", beh, src_col]]
                 bt["Share"] = (bt[beh] / bt["Records"]).map(lambda v: f"{v:.0%}")
                 table(bt)
             else:
                 big["label"] = big.apply(lambda r: f"{r['label']} (n={r['n']})", axis=1)
-                show(hbar(big, title, x_title="% of that source's records", max_x=100, label_width=190))
-            caption(int(big["n"].sum()), f"relevant records from sources with {MIN_N}+ records · {beh.lower()}", excl)
+                show(hbar(big, title, x_title="% of that source's records", label_width=190))
+            caption(int(big["n"].sum()), f"relevant records from sources with {MIN_N}+ records · {beh.lower()} · "
+                    "independent sources = distinct threads, videos, reviews or posts", excl)
         if len(small):
             insufficient(
                 int(small["n"].sum()),
-                small.rename(columns={"label": "Source", "n": "Records", "k": beh})[["Source", "Records", beh]],
+                small.rename(columns={"label": "Source", "n": "Records", "k": beh, "t": src_col})[
+                    ["Source", "Records", beh, src_col]],
             )
             caption(int(small["n"].sum()), f"relevant records from sources with fewer than {MIN_N} records", excl)
     footer()
@@ -785,7 +965,11 @@ NOT_ANSWERABLE = "Not answerable from these posts."
 INSTRUCTION = (
     "Answer only from the numbered posts below. Cite the post numbers you used in square brackets. "
     "If the posts do not answer the question, say so plainly and say what kind of evidence would be needed. "
-    "Never give investment advice. Never recommend a fund or action."
+    "Each post has a date. Whenever you cite a post, say when it was written, for example "
+    "\"a Play Store review from Oct 2025 [3]\". Put the date in the sentence and keep each citation as just the "
+    "post number in square brackets, like [3] or [3, 7]. If a date starts with \"approx.\", say it is approximate. "
+    "If the posts you use span several years, say so. "
+    "Never give investment advice. Never recommend a fund, scheme, stock or any investment action."
 )
 FORMAT_NOTE = (
     "Use only what a post states directly. Do not infer anything a post does not say, such as a writer's age, "
@@ -826,8 +1010,8 @@ def _terms(text):
 
 
 @st.cache_data
-def search_index():
-    """Stemmed term sets for every relevant post, plus inverse document frequency."""
+def search_index(period):
+    """Stemmed term sets for every relevant post in the evidence period, plus inverse document frequency."""
     docs = [(_terms(t) | _terms(q)) for t, q in zip(RELEVANT["text"], RELEVANT["quote"])]
     n = len(docs)
     df = {}
@@ -841,7 +1025,7 @@ def search_index():
 def rank_posts(question):
     """Rank relevant posts by keyword overlap with the question (IDF-weighted).
     Returns (all matching rows sorted best first, number of matching rows)."""
-    docs, idf = search_index()
+    docs, idf = search_index(PERIOD)
     q = _terms(question)
     scores = [sum(idf.get(w, 0) for w in q if w in d) for d in docs]
     df = RELEVANT.assign(_score=scores)
@@ -850,7 +1034,7 @@ def rank_posts(question):
 
 
 @st.cache_data
-def question_match_counts():
+def question_match_counts(period):
     return {q: rank_posts(q)[1] for q in RESEARCH_QUESTIONS}
 
 
@@ -883,7 +1067,9 @@ def build_posts_block(rows):
     out = []
     for i, (_, r) in enumerate(rows.iterrows(), 1):
         text = re.sub(r"\s+", " ", r["text"]).strip()[:1500]
-        out.append(f"[{i}] Source: {SOURCE_LABELS.get(r['source'], r['source'])}\n{text}")
+        out.append(
+            f"[{i}] Source: {SOURCE_LABELS.get(r['source'], r['source'])} · Date: {r['date_label']} · URL: {r['url']}\n{text}"
+        )
     return "\n\n".join(out)
 
 
@@ -918,13 +1104,19 @@ def ask_groq(question, posts_block):
     return content
 
 
-_CITE_RE = re.compile(r"\[(?:posts?\s*)?(\d+(?:\s*(?:,|–|-|and)\s*\d+)*)\]", re.I)
+_BRACKET_RE = re.compile(r"\[([^\[\]]{1,300})\]")
+_CITE_BODY_RE = re.compile(r"^(?:posts?\s*)?\d+(?:\s*(?:,|;|–|-|and)\s*\d+)*$", re.I)
 
 
 def cited_numbers(answer, max_n):
+    """Post numbers cited as [3], [3, 7], [3–5] or with dates attached, e.g. [3 (Oct 2025); 7 (Jan 2026)]."""
     found = []
-    for grp in _CITE_RE.findall(answer):
-        for part in re.split(r"\s*(?:,|and)\s*", grp):
+    for raw in _BRACKET_RE.findall(answer):
+        grp = re.sub(r"\([^)]*\)", "", raw).strip(" ;,")
+        if not _CITE_BODY_RE.match(grp):
+            continue
+        grp = re.sub(r"^posts?\s*", "", grp, flags=re.I)
+        for part in re.split(r"\s*(?:,|;|and)\s*", grp):
             m = re.match(r"(\d+)\s*[–-]\s*(\d+)$", part.strip())
             nums = range(int(m.group(1)), int(m.group(2)) + 1) if m else [int(part)] if part.strip().isdigit() else []
             for k in nums:
@@ -974,24 +1166,10 @@ def render_answer(question):
     if not cites:
         note("The answer did not cite any post.")
     for k in cites:
-        r = top.iloc[k - 1]
-        quote = (
-            f'<div class="vq">“{esc(r["quote"])}”</div>'
-            if r["quote_verified"] and r["quote"]
-            else '<div class="noq">No verified quote for this post.</div>'
-        )
-        st.markdown(
-            card_html(
-                f'<div class="meta"><span><b>[{k}] {esc(SOURCE_LABELS.get(r["source"], r["source"]))}</b></span>'
-                f'<span class="id">id {esc(r["id"])}</span></div>{quote}'
-                f'<div class="tags">Trigger: {esc(TRIGGER_LABELS.get(r["trigger"], r["trigger"]))} · '
-                f'Lapse: {esc(LAPSE_LABELS.get(r["lapse_type"], r["lapse_type"]))}</div>',
-                LAPSE_COLORS.get(r["lapse_type"], ACCENT),
-            ),
-            unsafe_allow_html=True,
-        )
+        evidence_card(top.iloc[k - 1], prefix=f"[{k}] ")
     note(
-        f"Answered from {len(top)} tagged posts. The tagger agrees with a human "
+        f"Answered from {len(top)} tagged posts ({PERIOD_SHORT[PERIOD]}), "
+        f"from {n_threads(top)} independent sources. The tagger agrees with a human "
         f"{V['human_agreement_overall']:.0%} of the time."
     )
 
@@ -1017,7 +1195,7 @@ def page_ask():
         render_answer(current)
 
     section("Or start with one of these")
-    counts = question_match_counts()
+    counts = question_match_counts(PERIOD)
     for row in range(0, len(RESEARCH_QUESTIONS), 3):
         cols = st.columns(3)
         for i, (col, q) in enumerate(zip(cols, RESEARCH_QUESTIONS[row: row + 3]), row):
@@ -1082,28 +1260,20 @@ def page_evidence():
     total = len(df)
     pages = max(1, -(-total // PAGE_SIZE))
     top_l, top_r = st.columns([3, 1])
-    top_l.markdown(f'<div class="finding" style="font-size:16px">{total} of {N_REL} records</div>', unsafe_allow_html=True)
+    top_l.markdown(
+        f'<div class="finding" style="font-size:16px">{total} of {N_REL} records '
+        f'<span class="small">· {total} item{"s" if total != 1 else ""} from {n_threads(df)} independent sources</span></div>',
+        unsafe_allow_html=True,
+    )
     page = top_r.number_input(f"Page (of {pages})", min_value=1, max_value=pages, value=1, step=1)
     caption(total, "relevant records matching the search and filters", EXCL)
 
     chunk = df.iloc[(page - 1) * PAGE_SIZE: page * PAGE_SIZE]
     for _, r in chunk.iterrows():
-        quote = (
-            f'<div class="vq">“{esc(r["quote"])}”</div>'
-            if r["quote_verified"] and r["quote"]
-            else '<div class="noq">No verified quote for this record.</div>'
-        )
-        st.markdown(
-            card_html(
-                f'<div class="meta"><span><b>{esc(SOURCE_LABELS.get(r["source"], r["source"]))}</b></span>'
-                f'<span class="id">id {esc(r["id"])}</span></div>{quote}'
-                f'<div class="tags">Trigger: {esc(TRIGGER_LABELS.get(r["trigger"], r["trigger"]))} · '
-                f'Lapse: {esc(LAPSE_LABELS.get(r["lapse_type"], r["lapse_type"]))} · '
-                f'Status: {esc(STATUS_LABELS.get(r["sip_status"], r["sip_status"]))} · '
-                f'Stage: {esc(STAGE_LABELS.get(r["stage"], r["stage"]))}</div>',
-                LAPSE_COLORS.get(r["lapse_type"], ACCENT),
-            ),
-            unsafe_allow_html=True,
+        evidence_card(
+            r,
+            extra_tags=f' · Status: {esc(STATUS_LABELS.get(r["sip_status"], r["sip_status"]))} · '
+                       f'Stage: {esc(STAGE_LABELS.get(r["stage"], r["stage"]))}',
         )
         with st.expander("Full text", expanded=False):
             st.write(r["text"])
@@ -1122,11 +1292,11 @@ def page_trust():
     )
     tiles(
         [
-            (f"{F['collected']:,}", "collected", "neutral"),
-            (f"{F['sip_related']:,}", "filtered to SIP-related", "neutral"),
-            (f"{F['tagged']:,}", "tagged", "neutral"),
-            (f"{F['parse_fail']}", "PARSE_FAIL excluded", "warn"),
-            (f"{N_REL}", "relevant", "neutral"),
+            (f"{F['collected']:,}", "collected (first scrape, all years)", "neutral"),
+            (f"{N_SIP_RELATED:,}", "filtered to SIP-related (first scrape, all years)", "neutral"),
+            (f"{len(TAGGED) + N_FAIL:,}", f"tagged ({PERIOD_SHORT[PERIOD]})", "neutral"),
+            (f"{N_FAIL}", f"PARSE_FAIL excluded ({PERIOD_SHORT[PERIOD]})", "warn"),
+            (f"{N_REL}", f"relevant ({PERIOD_SHORT[PERIOD]})", "neutral"),
         ]
     )
 
@@ -1135,29 +1305,40 @@ def page_trust():
     tagged_by = TAGGED["source"].value_counts()
     s["tagged"] = s["source"].map(tagged_by).fillna(0).astype(int)
     s["relevant"] = s["source"].map(N_BY_SOURCE).fillna(0).astype(int)
+    s["threads"] = s["source"].map(RELEVANT.groupby("source")["thread_id"].nunique()).fillna(0).astype(int)
+    dates = pd.to_datetime(TAGGED["date"], errors="coerce", format="mixed")
+    rng = dates.groupby(TAGGED["source"]).agg(["min", "max"])
+    s["dates"] = s["source"].map(
+        lambda x: f"{rng.loc[x, 'min']:%b %Y} – {rng.loc[x, 'max']:%b %Y}" if x in rng.index else "No items in this period"
+    )
     s["Source"] = s["source"].map(SOURCE_LABELS)
     s = s.sort_values("kept", ascending=False)
     tbl = s.rename(columns={
-        "what": "Collected from", "kept": "Kept (SIP-related)", "tagged": "Tagged (parsed)",
-        "relevant": "Relevant", "dates": "Date range",
-    })[["Source", "Collected from", "Kept (SIP-related)", "Tagged (parsed)", "Relevant", "Date range"]]
+        "what": "Collected from", "kept": "Kept (SIP-related, first scrape)", "tagged": "Tagged (parsed)",
+        "relevant": "Relevant", "threads": "Independent sources", "dates": "Date range (tagged)",
+    })[["Source", "Collected from", "Kept (SIP-related, first scrape)", "Tagged (parsed)", "Relevant",
+        "Independent sources", "Date range (tagged)"]]
     st.dataframe(
         tbl, hide_index=True, use_container_width=True, height=36 * (len(tbl) + 1) + 4,
         column_config={
             "Collected from": st.column_config.TextColumn(width="large"),
-            "Kept (SIP-related)": st.column_config.NumberColumn(format="%d"),
+            "Kept (SIP-related, first scrape)": st.column_config.NumberColumn(format="%d"),
             "Tagged (parsed)": st.column_config.NumberColumn(format="%d"),
             "Relevant": st.column_config.NumberColumn(format="%d"),
+            "Independent sources": st.column_config.NumberColumn(format="%d"),
         },
     )
     caption(
-        F["sip_related"], "SIP-related records by source",
-        f"tagged and relevant columns exclude {N_FAIL} PARSE_FAIL",
+        N_SIP_RELATED, "SIP-related records by source (first scrape, all years)",
+        f"tagged, relevant and date columns follow the evidence period ({PERIOD_SHORT[PERIOD]}) "
+        f"and exclude {N_FAIL} PARSE_FAIL",
     )
     st.markdown(
         f"<div class='small'>Raw counts per source before filtering are not recorded in the "
-        f"data files (only the {F['collected']:,} total), so they are not shown. YouTube comment dates were not "
-        "collected.</div>",
+        f"data files (only the {F['collected']:,} total), so they are not shown. {N_TOPUP} of the "
+        f"{N_ALL_TAGGED:,} tagged items come from a later top-up collection that is not part of "
+        "corpus_sip.csv, so the Kept column does not include them. YouTube only shows relative dates "
+        "(\"2 years ago\"), so YouTube dates are approximate to the month.</div>",
         unsafe_allow_html=True,
     )
 
@@ -1195,31 +1376,39 @@ def page_trust():
 
     section("Quotes and parse failures")
     good = int(TAGGED["quote_verified"].sum())
+    n_tagged = len(TAGGED) + N_FAIL
     st.markdown(
         f"**{good} of {len(TAGGED)}** parsed records ({pct(good, len(TAGGED))}) have a quote that appears word-for-word "
-        f"in the post. `findings.json` reports {V['quote_verified']} of {V['quote_total']}; that denominator includes "
-        f"the {N_FAIL} PARSE_FAIL rows, which have no quote."
+        f"in the post ({PERIOD_SHORT[PERIOD]}). PARSE_FAIL rows have no quote and are left out of this count."
     )
     st.markdown(
-        f"**{N_FAIL} of {F['tagged']}** tagging responses could not be parsed, so every field was recorded as "
-        "`PARSE_FAIL`. These are failed API responses, not judgements, and are excluded from every count here."
+        f"**{N_FAIL} of {n_tagged}** tagging responses ({PERIOD_SHORT[PERIOD]}) could not be parsed, so every field "
+        "was recorded as `PARSE_FAIL`. These are failed API responses, not judgements, and are excluded from every "
+        "count here."
     )
     if PARSE_FAIL_FIX_NOTE:
         st.markdown(f"**How it was fixed:** {PARSE_FAIL_FIX_NOTE}")
 
     section("How to read this dataset")
-    p = F["trigger_by_source_pct"]
+
+    def pf_share(src):
+        g = RELEVANT[RELEVANT["source"] == src]
+        k = int((g["trigger"] == "payment_failure").sum())
+        return f"{pct(k, len(g))} of {SOURCE_LABELS[src]} records ({k} of {len(g)})" if len(g) else             f"not measurable for {SOURCE_LABELS[src]} (no records in this period)"
+
     st.markdown(
         f"""
 - **Selection bias.** Public reviews over-represent people with problems. Nothing here measures how common a
   behaviour is among all investors.
-- **Source mix.** Payment failures are {p['play_store']['payment_failure']}% of Play Store records
-  ({int(((RELEVANT['source'] == 'play_store') & (RELEVANT['trigger'] == 'payment_failure')).sum())} of
-  {N_BY_SOURCE.get('play_store', 0)}) and {p['youtube']['payment_failure']}% of YouTube records
-  ({int(((RELEVANT['source'] == 'youtube') & (RELEVANT['trigger'] == 'payment_failure')).sum())} of
-  {N_BY_SOURCE.get('youtube', 0)}). Any overall ranking reflects where people complain, not why investors stop.
-- **Sampling.** {F['tagged']} of {F['sip_related']:,} SIP-related records were tagged, weighted toward posts
-  mentioning stopping or failure, so stop-related tags are over-represented by design.
+- **Source mix.** Payment failures are {pf_share('play_store')} and {pf_share('youtube')}
+  ({PERIOD_SHORT[PERIOD]}). Any overall ranking reflects where people complain, not why investors stop.
+- **Sampling.** {N_ALL_TAGGED - N_TOPUP} of {N_SIP_RELATED:,} SIP-related records from the first scrape were
+  tagged, plus {N_TOPUP} from a later top-up, weighted toward posts mentioning stopping or failure, so
+  stop-related tags are over-represented by design.
+- **Independent sources.** Several comments can come from one Reddit thread or YouTube video. Counts of items
+  are shown next to the number of distinct threads, videos, reviews or posts they come from.
+- **Lapses.** Voluntary and involuntary lapses are counted only where the SIP has lapsed. Active SIPs that
+  missed an instalment are shown separately.
 - **Segments.** Age, income and who influenced someone are almost never stated in public posts, so segment
   fields are mostly unclear and will be validated by interviews.
 - **Model limits.** Tags come from an LLM against a fixed codebook, agreeing with a human
@@ -1238,6 +1427,7 @@ PAGES = {
 }
 
 st.markdown(CSS, unsafe_allow_html=True)
+period_control()  # sets the evidence period for every page; drawn at the top of the main area
 with st.sidebar:
     st.markdown(
         '<div class="sb-title">SIP Discovery Engine</div>'
