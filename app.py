@@ -254,7 +254,6 @@ def date_label(raw, precision):
 def load_tagged():
     """All tagged rows, with PARSE_FAIL rows split off (they are failed API responses, not judgements)."""
     df = pd.read_csv(HERE / "tagged_items.csv")
-    df["period"] = df["recency"].astype(str).str.startswith("current").map({True: "current", False: "before"})
     fails = df[df["relevant"] == "PARSE_FAIL"].copy()
     df = df[df["relevant"] != "PARSE_FAIL"].copy()  # excluded from every count
     df["text"] = df["text"].map(mask_handles)
@@ -304,36 +303,14 @@ N_ALL_TAGGED = len(ALL_TAGGED) + len(ALL_FAILS)
 N_TOPUP = int((~pd.concat([ALL_TAGGED["id"], ALL_FAILS["id"]]).astype(str).isin(corpus_ids())).sum())
 N_PLATFORMS = len({SOURCE_LABELS.get(s, s).split()[0] for s in ALL_TAGGED["source"].unique()})  # Reddit posts + comments = 1
 
-PERIODS = {
-    "current": "Current (2024 onwards)",
-    "all": "All years",
-    "before": "Before 2024 only",
-}
-PERIOD_SHORT = {"current": "2024 onwards", "all": "all years", "before": "before 2024"}
-
-# Set by apply_period() before any page is drawn.
-PERIOD = "current"
-TAGGED = RELEVANT = FAILS = None
-N_FAIL = N_REL = 0
-N_BY_SOURCE = {}
-EXCL = ""
-
-
-def in_period(df, period):
-    return df if period == "all" else df[df["period"] == period]
-
-
-def apply_period(period):
-    """Every count, chart and caption on every page is drawn from these period-filtered frames."""
-    global PERIOD, TAGGED, RELEVANT, FAILS, N_FAIL, N_REL, N_BY_SOURCE, EXCL
-    PERIOD = period
-    TAGGED = in_period(ALL_TAGGED, period)
-    FAILS = in_period(ALL_FAILS, period)
-    RELEVANT = TAGGED[TAGGED["relevant"] == "yes"]
-    N_FAIL = len(FAILS)
-    N_REL = len(RELEVANT)
-    N_BY_SOURCE = RELEVANT["source"].value_counts().to_dict()
-    EXCL = f"{PERIOD_SHORT[period]} · excludes {N_FAIL} PARSE_FAIL"
+# Every page uses all items from all years and all sources together.
+TAGGED = ALL_TAGGED
+FAILS = ALL_FAILS
+RELEVANT = TAGGED[TAGGED["relevant"] == "yes"]
+N_FAIL = len(FAILS)
+N_REL = len(RELEVANT)
+N_BY_SOURCE = RELEVANT["source"].value_counts().to_dict()
+EXCL = f"excludes {N_FAIL} PARSE_FAIL"
 
 
 def n_threads(df):
@@ -418,7 +395,7 @@ def note(text):
 
 
 def caption(n, what, excl=None):
-    """Global caption format: n = <count> records · <what> · <period> · <exclusion>"""
+    """Global caption format: n = <count> records · <what> · <exclusion>"""
     note(f"n = {n:,} records · {what} · {excl or EXCL}")
 
 
@@ -484,26 +461,9 @@ def footer():
         f'<div class="foot"><b>Not investment advice.</b> This dashboard describes what public posts say; '
         f"it does not recommend any fund, stock or action. Built from public data only. No usernames or "
         f"personal data are shown (handles in post text are replaced with [user]). {N_FAIL} tagged records "
-        f"from this evidence period that failed to parse (PARSE_FAIL) are excluded from every count.</div>",
+        f"that failed to parse (PARSE_FAIL) are excluded from every count.</div>",
         unsafe_allow_html=True,
     )
-
-
-def period_control():
-    """The one global control: which years of evidence every page uses."""
-    period = st.radio(
-        "Evidence period", list(PERIODS), format_func=PERIODS.get, horizontal=True, key="period",
-    )
-    apply_period(period)
-    rel_all = ALL_TAGGED[ALL_TAGGED["relevant"] == "yes"]
-    hidden = len(rel_all) - N_REL
-    if period == "current":
-        line = f"Showing {N_REL:,} items. {hidden:,} items from before 2024 are hidden."
-    elif period == "before":
-        line = f"Showing {N_REL:,} items. {hidden:,} items from 2024 onwards are hidden."
-    else:
-        line = f"Showing all {N_REL:,} items, from every year."
-    st.markdown(f'<div class="small">{esc(line)} Items = relevant tagged records.</div>', unsafe_allow_html=True)
 
 
 # ---------------------------------------------------------------------------
@@ -657,16 +617,12 @@ def page_overview():
     n_tagged = len(TAGGED) + N_FAIL
     tiles(
         [
-            (f"{F['collected']:,}", "posts collected (all years, first scrape)", "neutral"),
-            (f"{N_SIP_RELATED:,}", "SIP-related after filtering (all years, first scrape)", "neutral"),
-            (f"{n_tagged:,}", f"tagged by the model ({PERIOD_SHORT[PERIOD]})", "neutral"),
-            (f"{N_REL}", f"confirmed relevant ({PERIOD_SHORT[PERIOD]})", "neutral"),
-            (f"{N_FAIL}", f"excluded as PARSE_FAIL ({PERIOD_SHORT[PERIOD]})", "warn"),
+            (f"{F['collected']:,}", "posts collected (first scrape)", "neutral"),
+            (f"{N_SIP_RELATED:,}", "SIP-related after filtering (first scrape)", "neutral"),
+            (f"{n_tagged:,}", "tagged by the model", "neutral"),
+            (f"{N_REL}", "confirmed relevant", "neutral"),
+            (f"{N_FAIL}", "excluded as PARSE_FAIL", "warn"),
         ]
-    )
-    note(
-        "The first two tiles describe the whole first collection and are not split by year. "
-        "The other three follow the evidence period."
     )
 
     section("How the evidence was built")
@@ -698,7 +654,7 @@ def page_overview():
     top3 = r[r["trigger"].isin(NAMED_TRIGGERS)]["trigger"].value_counts().head(3).index.tolist()
     cards = [(OPPORTUNITY_TITLES[t][0], r[r["trigger"] == t], OPPORTUNITY_TITLES[t][1]) for t in top3]
     if not cards:
-        gap_box("No named trigger in this evidence period.", head="No records")
+        gap_box("No named trigger in the data.", head="No records")
     elif tables:
         table(
             pd.DataFrame(
@@ -1010,8 +966,8 @@ def _terms(text):
 
 
 @st.cache_data
-def search_index(period):
-    """Stemmed term sets for every relevant post in the evidence period, plus inverse document frequency."""
+def search_index():
+    """Stemmed term sets for every relevant post plus inverse document frequency."""
     docs = [(_terms(t) | _terms(q)) for t, q in zip(RELEVANT["text"], RELEVANT["quote"])]
     n = len(docs)
     df = {}
@@ -1025,7 +981,7 @@ def search_index(period):
 def rank_posts(question):
     """Rank relevant posts by keyword overlap with the question (IDF-weighted).
     Returns (all matching rows sorted best first, number of matching rows)."""
-    docs, idf = search_index(PERIOD)
+    docs, idf = search_index()
     q = _terms(question)
     scores = [sum(idf.get(w, 0) for w in q if w in d) for d in docs]
     df = RELEVANT.assign(_score=scores)
@@ -1034,7 +990,7 @@ def rank_posts(question):
 
 
 @st.cache_data
-def question_match_counts(period):
+def question_match_counts():
     return {q: rank_posts(q)[1] for q in RESEARCH_QUESTIONS}
 
 
@@ -1168,7 +1124,7 @@ def render_answer(question):
     for k in cites:
         evidence_card(top.iloc[k - 1], prefix=f"[{k}] ")
     note(
-        f"Answered from {len(top)} tagged posts ({PERIOD_SHORT[PERIOD]}), "
+        f"Answered from {len(top)} tagged posts, "
         f"from {n_threads(top)} independent sources. The tagger agrees with a human "
         f"{V['human_agreement_overall']:.0%} of the time."
     )
@@ -1195,7 +1151,7 @@ def page_ask():
         render_answer(current)
 
     section("Or start with one of these")
-    counts = question_match_counts(PERIOD)
+    counts = question_match_counts()
     for row in range(0, len(RESEARCH_QUESTIONS), 3):
         cols = st.columns(3)
         for i, (col, q) in enumerate(zip(cols, RESEARCH_QUESTIONS[row: row + 3]), row):
@@ -1292,11 +1248,11 @@ def page_trust():
     )
     tiles(
         [
-            (f"{F['collected']:,}", "collected (first scrape, all years)", "neutral"),
-            (f"{N_SIP_RELATED:,}", "filtered to SIP-related (first scrape, all years)", "neutral"),
-            (f"{len(TAGGED) + N_FAIL:,}", f"tagged ({PERIOD_SHORT[PERIOD]})", "neutral"),
-            (f"{N_FAIL}", f"PARSE_FAIL excluded ({PERIOD_SHORT[PERIOD]})", "warn"),
-            (f"{N_REL}", f"relevant ({PERIOD_SHORT[PERIOD]})", "neutral"),
+            (f"{F['collected']:,}", "collected (first scrape)", "neutral"),
+            (f"{N_SIP_RELATED:,}", "filtered to SIP-related (first scrape)", "neutral"),
+            (f"{len(TAGGED) + N_FAIL:,}", "tagged", "neutral"),
+            (f"{N_FAIL}", "PARSE_FAIL excluded", "warn"),
+            (f"{N_REL}", "relevant", "neutral"),
         ]
     )
 
@@ -1309,7 +1265,7 @@ def page_trust():
     dates = pd.to_datetime(TAGGED["date"], errors="coerce", format="mixed")
     rng = dates.groupby(TAGGED["source"]).agg(["min", "max"])
     s["dates"] = s["source"].map(
-        lambda x: f"{rng.loc[x, 'min']:%b %Y} – {rng.loc[x, 'max']:%b %Y}" if x in rng.index else "No items in this period"
+        lambda x: f"{rng.loc[x, 'min']:%b %Y} – {rng.loc[x, 'max']:%b %Y}" if x in rng.index else "No tagged items"
     )
     s["Source"] = s["source"].map(SOURCE_LABELS)
     s = s.sort_values("kept", ascending=False)
@@ -1329,9 +1285,8 @@ def page_trust():
         },
     )
     caption(
-        N_SIP_RELATED, "SIP-related records by source (first scrape, all years)",
-        f"tagged, relevant and date columns follow the evidence period ({PERIOD_SHORT[PERIOD]}) "
-        f"and exclude {N_FAIL} PARSE_FAIL",
+        N_SIP_RELATED, "SIP-related records by source (first scrape)",
+        f"tagged and relevant columns exclude {N_FAIL} PARSE_FAIL",
     )
     st.markdown(
         f"<div class='small'>Raw counts per source before filtering are not recorded in the "
@@ -1379,10 +1334,10 @@ def page_trust():
     n_tagged = len(TAGGED) + N_FAIL
     st.markdown(
         f"**{good} of {len(TAGGED)}** parsed records ({pct(good, len(TAGGED))}) have a quote that appears word-for-word "
-        f"in the post ({PERIOD_SHORT[PERIOD]}). PARSE_FAIL rows have no quote and are left out of this count."
+        f"in the post. PARSE_FAIL rows have no quote and are left out of this count."
     )
     st.markdown(
-        f"**{N_FAIL} of {n_tagged}** tagging responses ({PERIOD_SHORT[PERIOD]}) could not be parsed, so every field "
+        f"**{N_FAIL} of {n_tagged}** tagging responses could not be parsed, so every field "
         "was recorded as `PARSE_FAIL`. These are failed API responses, not judgements, and are excluded from every "
         "count here."
     )
@@ -1394,14 +1349,14 @@ def page_trust():
     def pf_share(src):
         g = RELEVANT[RELEVANT["source"] == src]
         k = int((g["trigger"] == "payment_failure").sum())
-        return f"{pct(k, len(g))} of {SOURCE_LABELS[src]} records ({k} of {len(g)})" if len(g) else             f"not measurable for {SOURCE_LABELS[src]} (no records in this period)"
+        return f"{pct(k, len(g))} of {SOURCE_LABELS[src]} records ({k} of {len(g)})" if len(g) else             f"not measurable for {SOURCE_LABELS[src]} (no records)"
 
     st.markdown(
         f"""
 - **Selection bias.** Public reviews over-represent people with problems. Nothing here measures how common a
   behaviour is among all investors.
-- **Source mix.** Payment failures are {pf_share('play_store')} and {pf_share('youtube')}
-  ({PERIOD_SHORT[PERIOD]}). Any overall ranking reflects where people complain, not why investors stop.
+- **Source mix.** Payment failures are {pf_share('play_store')} and {pf_share('youtube')}.
+  Any overall ranking reflects where people complain, not why investors stop.
 - **Sampling.** {N_ALL_TAGGED - N_TOPUP} of {N_SIP_RELATED:,} SIP-related records from the first scrape were
   tagged, plus {N_TOPUP} from a later top-up, weighted toward posts mentioning stopping or failure, so
   stop-related tags are over-represented by design.
@@ -1427,7 +1382,6 @@ PAGES = {
 }
 
 st.markdown(CSS, unsafe_allow_html=True)
-period_control()  # sets the evidence period for every page; drawn at the top of the main area
 with st.sidebar:
     st.markdown(
         '<div class="sb-title">SIP Discovery Engine</div>'
