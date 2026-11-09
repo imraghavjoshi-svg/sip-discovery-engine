@@ -151,6 +151,35 @@ section[data-testid="stSidebar"] .sb-foot {{
 .st-key-ask_box [data-baseweb="input"]:focus-within {{ border-color: {ACCENT}; }}
 .st-key-ask_box input {{ height: 56px; font-size: 16px; padding: 0 18px; color: {INK}; }}
 .st-key-ask_go button {{ height: 50px; font-size: 16px; font-weight: 600; border-radius: 10px; }}
+
+/* ---------- Primary buttons (all of them) ----------
+   The global markdown <p> colour above would otherwise turn the label dark.
+   White, weight 600, in every state; disabled keeps the orange at lower opacity. */
+button[data-testid="stBaseButton-primary"],
+button[kind="primary"] {{
+  background-color: {ACCENT} !important; border-color: {ACCENT} !important;
+  color: #FFFFFF !important; font-weight: 600 !important;
+}}
+button[data-testid="stBaseButton-primary"]:hover,
+button[data-testid="stBaseButton-primary"]:focus,
+button[data-testid="stBaseButton-primary"]:focus:not(:active),
+button[data-testid="stBaseButton-primary"]:active,
+button[kind="primary"]:hover,
+button[kind="primary"]:focus,
+button[kind="primary"]:active {{
+  background-color: #9A4608 !important; border-color: #9A4608 !important; color: #FFFFFF !important;
+}}
+button[data-testid="stBaseButton-primary"]:disabled,
+button[kind="primary"]:disabled {{
+  background-color: rgba(180, 83, 10, 0.85) !important; border-color: transparent !important;
+  color: #FFFFFF !important; cursor: not-allowed; opacity: 1 !important;
+}}
+button[data-testid="stBaseButton-primary"] p,
+button[data-testid="stBaseButton-primary"] div,
+button[kind="primary"] p,
+button[kind="primary"] div {{
+  color: #FFFFFF !important; font-weight: 600 !important;
+}}
 .ask-note {{ color: {FAINT}; font-size: 12px; line-height: 1.5; margin: 2px 0 6px 0; }}
 
 [class*="st-key-qcard_"] button {{
